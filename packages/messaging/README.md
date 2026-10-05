@@ -78,6 +78,57 @@ bun test src/worker.test.ts
 
 Run `bun test` from the same directory to include the existing messaging tests.
 
+## Port Messaging
+
+Import `definePortMessaging` from `@webext-core/messaging/port`.
+Use the same namespace and protocol map at both ends of the channel.
+
+```ts
+import { definePortMessaging } from '@webext-core/messaging/port';
+
+interface ProtocolMap {
+  getByteLength(data: Uint8Array): number;
+}
+
+const channel = new MessageChannel();
+const sender = definePortMessaging<ProtocolMap>({
+  namespace: 'example',
+  port: channel.port1,
+});
+const receiver = definePortMessaging<ProtocolMap>({
+  namespace: 'example',
+  port: channel.port2,
+});
+receiver.onMessage('getByteLength', ({ data }) => data.byteLength);
+
+const bytes = new Uint8Array([1, 2, 3]);
+const length = await sender.sendMessage('getByteLength', bytes, [bytes.buffer]);
+// length is 3. The sender's buffer is detached.
+```
+
+The optional third argument lists the objects to transfer with the request.
+Responses use normal cloning and do not accept a transfer list.
+For AudioWorklets, use `AudioWorkletNode.port` outside the processor and `this.port` inside the processor.
+The messenger does not call `structuredClone()`.
+It starts the port but does not close it when `removeAllListeners()` runs.
+The caller owns and closes the port.
+
+**IMPORTANT: A successful `postMessage` call does not guarantee delivery.**
+Receiver-side deserialization failures raise `messageerror` on the receiving port.
+The port does not report these failures to the sender.
+This messenger does not send an error response for them.
+The caller's `sendMessage` promise can remain pending.
+
+### Port Tests
+
+The automated tests use real `MessageChannel` ports.
+Each test defines its protocol, handlers, and assertions in the same place.
+From `packages/messaging`, run:
+
+```sh
+bun test src/port.test.ts
+```
+
 ## Get Started
 
 See [documentation](https://webext-core.aklinker1.io/messaging/installation) to

@@ -42,6 +42,10 @@
     "./worker": {
       "types": "./dist/worker.d.mts",
       "default": "./dist/worker.mjs"
+    },
+    "./port": {
+      "types": "./dist/port.d.mts",
+      "default": "./dist/port.mjs"
     }
   },
   "publishConfig": {

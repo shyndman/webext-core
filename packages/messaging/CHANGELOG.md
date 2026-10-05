@@ -5,6 +5,7 @@
 ### Added
 
 - Add worker messaging support
+- Add `definePortMessaging` with request transfers and AudioWorklet support.
 
 ## v4.0.0
 
