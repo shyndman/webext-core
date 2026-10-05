@@ -38,6 +38,10 @@
     "./page": {
       "types": "./dist/page.d.mts",
       "default": "./dist/page.mjs"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.mts",
+      "default": "./dist/worker.mjs"
     }
   },
   "publishConfig": {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add worker messaging support
+
 ## v4.0.0
 
 [compare changes](https://github.com/aklinker1/webext-core/compare/messaging-v3.0.3...messaging-v4.0.0)
