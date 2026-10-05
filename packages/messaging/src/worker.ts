@@ -1,5 +1,7 @@
-import { GenericMessenger, defineGenericMessanging } from './generic';
-import { NamespaceMessagingConfig, Message } from './types';
+import { serializeError } from '@aklinker1/zero-serialize-error';
+
+import { PostMessageMessenger, defineGenericMessanging } from './generic';
+import { NamespaceMessagingConfig, Message, PostMessageSendOptions } from './types';
 import { createId } from './utils';
 
 const REQUEST_TYPE = '@webext-core/messaging/worker';
@@ -11,7 +13,7 @@ const RESPONSE_TYPE = '@webext-core/messaging/worker/response';
  * Use the `Worker` reference in any context that holds it. Use `self` inside the worker.
  */
 export interface WorkerMessagingTarget {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, options?: StructuredSerializeOptions): void;
   addEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   removeEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
 }
@@ -29,12 +31,15 @@ export interface WorkerMessagingConfig extends NamespaceMessagingConfig {
   worker: WorkerMessagingTarget;
 }
 
+/**
+ * `sendMessage` accepts native transfer options and `expectResponse: false` to send without waiting
+ * for a response. Responses use normal cloning without a transfer list.
+ */
+export type WorkerSendMessageArgs = [options?: PostMessageSendOptions];
+
 /** Messenger returned by `defineWorkerMessaging`. */
-export type WorkerMessenger<TProtocolMap extends Record<string, any>> = GenericMessenger<
-  TProtocolMap,
-  {},
-  []
->;
+export type WorkerMessenger<TProtocolMap extends Record<string, any>> =
+  PostMessageMessenger<TProtocolMap>;
 
 /**
  * Returns a `WorkerMessenger` backed by the `Worker.postMessage` API. It can be used to communicate
@@ -87,33 +92,58 @@ export function defineWorkerMessaging<
   const worker = config.worker;
   const instanceId = createId();
 
-  let removeAdditionalListeners: Array<() => void> = [];
+  const removeAdditionalListeners = new Set<() => void>();
 
-  const sendWorkerMessage = (message: Message<TProtocolMap, any>) =>
-    new Promise((res) => {
-      const responseListener = (event: MessageEvent) => {
-        if (
-          event.data.type === RESPONSE_TYPE &&
-          event.data.namespace === namespace &&
-          event.data.instanceId !== instanceId &&
-          event.data.message.type === message.type &&
-          event.data.message.id === message.id
-        ) {
-          res(event.data.response);
-          removeResponseListener();
-        }
-      };
-      const removeResponseListener = () => worker.removeEventListener('message', responseListener);
-      removeAdditionalListeners.push(removeResponseListener);
-      worker.addEventListener('message', responseListener);
-      worker.postMessage({ type: REQUEST_TYPE, message, namespace, instanceId });
-    });
+  const sendWorkerMessage = (
+    message: Message<TProtocolMap, any>,
+    options: PostMessageSendOptions = {},
+  ) => {
+    const expectResponse = options.expectResponse !== false;
+    const request = { type: REQUEST_TYPE, message, namespace, instanceId, expectResponse };
+    if (!expectResponse) {
+      try {
+        worker.postMessage(request, options);
+        return Promise.resolve({ res: undefined });
+      } catch (err) {
+        config.logger?.error('[messaging] Failed to send worker message', err);
+        return Promise.reject(err);
+      }
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 
-  const messenger = defineGenericMessanging<TProtocolMap, {}, []>({
+    const responseListener = (event: MessageEvent) => {
+      if (
+        event.data.type === RESPONSE_TYPE &&
+        event.data.namespace === namespace &&
+        event.data.instanceId !== instanceId &&
+        event.data.message.type === message.type &&
+        event.data.message.id === message.id
+      ) {
+        removeResponseListener();
+        resolve(event.data.response);
+      }
+    };
+    const removeResponseListener = () => {
+      worker.removeEventListener('message', responseListener);
+      removeAdditionalListeners.delete(removeResponseListener);
+    };
+    removeAdditionalListeners.add(removeResponseListener);
+    worker.addEventListener('message', responseListener);
+    try {
+      worker.postMessage(request, options);
+    } catch (err) {
+      removeResponseListener();
+      config.logger?.error('[messaging] Failed to send worker message', err);
+      reject(err);
+    }
+    return promise;
+  };
+
+  const messenger = defineGenericMessanging<TProtocolMap, {}, WorkerSendMessageArgs>({
     ...config,
 
-    sendMessage(message) {
-      return sendWorkerMessage(message);
+    sendMessage(message, options) {
+      return sendWorkerMessage(message, options);
     },
 
     addRootListener(processMessage) {
@@ -126,20 +156,28 @@ export function defineWorkerMessaging<
           return;
 
         const response = await processMessage(event.data.message);
-        worker.postMessage({
+        if (event.data.expectResponse === false) {
+          if (response && 'err' in response)
+            config.logger?.error('[messaging] Worker message handler failed', response.err);
+          return;
+        }
+        const responseMessage = {
           type: RESPONSE_TYPE,
           response,
           instanceId,
-          message: event.data.message,
+          message: { id: event.data.message.id, type: event.data.message.type },
           namespace,
-        });
+        };
+        try {
+          worker.postMessage(responseMessage);
+        } catch (err) {
+          config.logger?.error('[messaging] Failed to send worker response', err);
+          worker.postMessage({ ...responseMessage, response: { err: serializeError(err) } });
+        }
       };
 
       worker.addEventListener('message', listener);
       return () => worker.removeEventListener('message', listener);
-    },
-    verifyMessageData(data) {
-      return structuredClone(data);
     },
   });
 
@@ -148,7 +186,7 @@ export function defineWorkerMessaging<
     removeAllListeners() {
       messenger.removeAllListeners();
       removeAdditionalListeners.forEach((removeListener) => removeListener());
-      removeAdditionalListeners = [];
+      removeAdditionalListeners.clear();
     },
-  };
+  } as WorkerMessenger<TProtocolMap>;
 }

@@ -195,4 +195,132 @@ describe('Worker Messenger', () => {
 
     expect(onResponse).not.toHaveBeenCalled();
   });
+
+  it('should transfer buffers natively and detach the sender buffer', async () => {
+    interface MessageSchema {
+      sum(data: Uint8Array): number;
+    }
+    const defineMessaging = await defineTestWorker((defineMessaging) => {
+      defineMessaging<MessageSchema>().onMessage('sum', ({ data }) =>
+        data.reduce((sum, value) => sum + value, 0),
+      );
+    });
+    const messenger = defineMessaging<MessageSchema>();
+    const bytes = new Uint8Array([2, 3, 5]);
+
+    expect(await messenger.sendMessage('sum', bytes, { transfer: [bytes.buffer] })).toBe(10);
+    expect(bytes.buffer.byteLength).toBe(0);
+  });
+
+  it('should reply without echoing a transferred MessagePort', async () => {
+    interface MessageSchema {
+      receive(data: MessagePort): string;
+    }
+    const defineMessaging = await defineTestWorker((defineMessaging) => {
+      defineMessaging<MessageSchema>().onMessage('receive', ({ data }) => {
+        data.close();
+        return 'received';
+      });
+    });
+    const messenger = defineMessaging<MessageSchema>();
+    const channel = new MessageChannel();
+    try {
+      expect(
+        await messenger.sendMessage('receive', channel.port1, { transfer: [channel.port1] }),
+      ).toBe('received');
+    } finally {
+      channel.port1.close();
+      channel.port2.close();
+    }
+  });
+
+  it('should send without acknowledgment when there is no receiving handler', async () => {
+    interface MessageSchema {
+      notify(data: string): void;
+    }
+    const defineMessaging = await defineTestWorker(() => {});
+    const messenger = defineMessaging<MessageSchema>();
+
+    expect(
+      await messenger.sendMessage('notify', 'hello', { expectResponse: false }),
+    ).toBeUndefined();
+  });
+
+  it('should deliver transferred no-ack data without waiting for handler completion', async () => {
+    interface MessageSchema {
+      notify(data: Uint8Array): void;
+      received(): number[];
+      release(): void;
+    }
+    const defineMessaging = await defineTestWorker((defineMessaging) => {
+      const messenger = defineMessaging<MessageSchema>();
+      let received: number[] = [];
+      let release: (() => void) | undefined;
+      messenger.onMessage('notify', ({ data }) => {
+        received = Array.from(data);
+        const deferred = Promise.withResolvers<void>();
+        release = deferred.resolve;
+        return deferred.promise;
+      });
+      messenger.onMessage('received', () => received);
+      messenger.onMessage('release', () => release?.());
+    });
+    const messenger = defineMessaging<MessageSchema>();
+    const bytes = new Uint8Array([4, 8, 15]);
+
+    expect(
+      await messenger.sendMessage('notify', bytes, {
+        transfer: [bytes.buffer],
+        expectResponse: false,
+      }),
+    ).toBeUndefined();
+    expect(bytes.buffer.byteLength).toBe(0);
+    expect(await messenger.sendMessage('received')).toEqual([4, 8, 15]);
+    await messenger.sendMessage('release');
+  });
+
+  it('should wait for a void handler acknowledgment by default', async () => {
+    interface MessageSchema {
+      notify(): void;
+      ready(): void;
+      release(): void;
+    }
+    const defineMessaging = await defineTestWorker((defineMessaging) => {
+      const messenger = defineMessaging<MessageSchema>();
+      let release: (() => void) | undefined;
+      messenger.onMessage('notify', () => {
+        const deferred = Promise.withResolvers<void>();
+        release = deferred.resolve;
+        return deferred.promise;
+      });
+      messenger.onMessage('ready', () => {});
+      messenger.onMessage('release', () => release?.());
+    });
+    const messenger = defineMessaging<MessageSchema>();
+    const completed = vi.fn();
+    const pending = messenger.sendMessage('notify').then(completed);
+    await messenger.sendMessage('ready');
+
+    expect(completed).not.toHaveBeenCalled();
+    await messenger.sendMessage('release');
+    await pending;
+    expect(completed).toHaveBeenCalledWith(undefined);
+  });
+
+  it('should reject invalid transfers even when acknowledgment is disabled', async () => {
+    interface MessageSchema {
+      notify(data: ArrayBuffer): void;
+    }
+    const defineMessaging = await defineTestWorker(() => {});
+    const messenger = defineMessaging<MessageSchema>();
+    const buffer = new ArrayBuffer(4);
+
+    const error = await messenger
+      .sendMessage('notify', buffer, { transfer: [buffer, buffer], expectResponse: false })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ name: 'DataCloneError' });
+    expect(buffer.byteLength).toBe(4);
+  });
 });

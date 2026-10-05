@@ -85,6 +85,17 @@ export interface NamespaceMessagingConfig extends BaseMessagingConfig {
   namespace: string;
 }
 
+/** Options for sending a message through a worker or port. */
+export interface PostMessageSendOptions extends StructuredSerializeOptions {
+  /**
+   * Wait for the handler's response. Set to false to resolve after posting the message. Handler
+   * errors and return values are not sent back when this is false.
+   *
+   * @default true
+   */
+  expectResponse?: boolean;
+}
+
 /** Contains information about the message received. */
 export interface Message<
   TProtocolMap extends Record<string, any>,

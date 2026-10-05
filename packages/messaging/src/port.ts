@@ -1,7 +1,7 @@
 import { serializeError } from '@aklinker1/zero-serialize-error';
 
-import { GenericMessenger, defineGenericMessanging } from './generic';
-import { NamespaceMessagingConfig, Message } from './types';
+import { PostMessageMessenger, defineGenericMessanging } from './generic';
+import { NamespaceMessagingConfig, Message, PostMessageSendOptions } from './types';
 import { createId } from './utils';
 
 const REQUEST_TYPE = '@webext-core/messaging/port';
@@ -14,9 +14,10 @@ export interface PortMessagingConfig extends NamespaceMessagingConfig {
 }
 
 /**
- * For a `PortMessenger`, `sendMessage` accepts an additional transfer list. The listed objects must
- * be part of the message data. Transferring an object moves its resources and makes them
- * unavailable to the sender.
+ * For a `PortMessenger`, `sendMessage` accepts options with a transfer list and `expectResponse`.
+ * The listed objects must be part of the message data. Transferring an object moves its resources
+ * and makes them unavailable to the sender. Set `expectResponse: false` to resolve after posting
+ * without waiting for a handler or response.
  *
  * > See [Transferable
  * > objects](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects)
@@ -24,14 +25,11 @@ export interface PortMessagingConfig extends NamespaceMessagingConfig {
  *
  * Responses use normal cloning and do not accept a transfer list.
  */
-export type PortSendMessageArgs = [transfer?: Transferable[]];
+export type PortSendMessageArgs = [options?: PostMessageSendOptions];
 
 /** Messenger returned by `definePortMessaging`. */
-export type PortMessenger<TProtocolMap extends Record<string, any>> = GenericMessenger<
-  TProtocolMap,
-  {},
-  PortSendMessageArgs
->;
+export type PortMessenger<TProtocolMap extends Record<string, any>> =
+  PostMessageMessenger<TProtocolMap>;
 
 /**
  * Returns a `PortMessenger` backed by the `MessagePort.postMessage` API. It can be used to
@@ -78,7 +76,9 @@ export type PortMessenger<TProtocolMap extends Record<string, any>> = GenericMes
  *   receiver.onMessage('getByteLength', ({ data }) => data.byteLength);
  *
  *   const bytes = new Uint8Array([1, 2, 3]);
- *   const length = await messenger.sendMessage('getByteLength', bytes, [bytes.buffer]);
+ *   const length = await messenger.sendMessage('getByteLength', bytes, {
+ *     transfer: [bytes.buffer],
+ *   });
  */
 export function definePortMessaging<TProtocolMap extends Record<string, any> = Record<string, any>>(
   config: PortMessagingConfig,
@@ -87,40 +87,59 @@ export function definePortMessaging<TProtocolMap extends Record<string, any> = R
   const port = config.port;
   const instanceId = createId();
 
-  let removeAdditionalListeners: Array<() => void> = [];
+  const removeAdditionalListeners = new Set<() => void>();
 
-  const sendPortMessage = (message: Message<TProtocolMap, any>, transfer: Transferable[] = []) =>
-    new Promise((res, reject) => {
-      const responseListener = (event: MessageEvent) => {
-        if (
-          event.data.type === RESPONSE_TYPE &&
-          event.data.namespace === namespace &&
-          event.data.instanceId !== instanceId &&
-          event.data.message.type === message.type &&
-          event.data.message.id === message.id
-        ) {
-          res(event.data.response);
-          removeResponseListener();
-        }
-      };
-      const removeResponseListener = () => port.removeEventListener('message', responseListener);
-      removeAdditionalListeners.push(removeResponseListener);
-      port.addEventListener('message', responseListener);
-      port.start();
+  const sendPortMessage = (
+    message: Message<TProtocolMap, any>,
+    options: PostMessageSendOptions = {},
+  ) => {
+    const expectResponse = options.expectResponse !== false;
+    const request = { type: REQUEST_TYPE, message, namespace, instanceId, expectResponse };
+    if (!expectResponse) {
       try {
-        port.postMessage({ type: REQUEST_TYPE, message, namespace, instanceId }, transfer);
+        port.postMessage(request, options);
+        return Promise.resolve({ res: undefined });
       } catch (err) {
-        removeResponseListener();
         config.logger?.error('[messaging] Failed to send port message', err);
-        reject(err);
+        return Promise.reject(err);
       }
-    });
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+
+    const responseListener = (event: MessageEvent) => {
+      if (
+        event.data.type === RESPONSE_TYPE &&
+        event.data.namespace === namespace &&
+        event.data.instanceId !== instanceId &&
+        event.data.message.type === message.type &&
+        event.data.message.id === message.id
+      ) {
+        removeResponseListener();
+        resolve(event.data.response);
+      }
+    };
+    const removeResponseListener = () => {
+      port.removeEventListener('message', responseListener);
+      removeAdditionalListeners.delete(removeResponseListener);
+    };
+    removeAdditionalListeners.add(removeResponseListener);
+    port.addEventListener('message', responseListener);
+    port.start();
+    try {
+      port.postMessage(request, options);
+    } catch (err) {
+      removeResponseListener();
+      config.logger?.error('[messaging] Failed to send port message', err);
+      reject(err);
+    }
+    return promise;
+  };
 
   const messenger = defineGenericMessanging<TProtocolMap, {}, PortSendMessageArgs>({
     ...config,
 
-    sendMessage(message, transfer) {
-      return sendPortMessage(message, transfer);
+    sendMessage(message, options) {
+      return sendPortMessage(message, options);
     },
 
     addRootListener(processMessage) {
@@ -133,6 +152,11 @@ export function definePortMessaging<TProtocolMap extends Record<string, any> = R
           return;
 
         const response = await processMessage(event.data.message);
+        if (event.data.expectResponse === false) {
+          if (response && 'err' in response)
+            config.logger?.error('[messaging] Port message handler failed', response.err);
+          return;
+        }
         // Do not echo the request data. It can contain transfer-only objects.
         const responseMessage = {
           type: RESPONSE_TYPE,
@@ -160,7 +184,7 @@ export function definePortMessaging<TProtocolMap extends Record<string, any> = R
     removeAllListeners() {
       messenger.removeAllListeners();
       removeAdditionalListeners.forEach((removeListener) => removeListener());
-      removeAdditionalListeners = [];
+      removeAdditionalListeners.clear();
     },
-  };
+  } as PortMessenger<TProtocolMap>;
 }

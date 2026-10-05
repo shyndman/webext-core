@@ -6,6 +6,9 @@
 
 - Add worker messaging support
 - Add `definePortMessaging` with request transfers and AudioWorklet support.
+- Support worker buffer transfers without copying request data into responses.
+- Add `expectResponse: false` and transfer options to worker and port messages.
+- Release completed and failed response callbacks in both transports.
 
 ## v4.0.0
 

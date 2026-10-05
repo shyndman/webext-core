@@ -192,7 +192,7 @@ describe('Port Messenger', () => {
     const bytes = new Uint8Array([4, 8, 12]);
     messenger2.onMessage('test', ({ data }) => Array.from(data));
 
-    const actual = await messenger1.sendMessage('test', bytes, [bytes.buffer]);
+    const actual = await messenger1.sendMessage('test', bytes, { transfer: [bytes.buffer] });
 
     expect(actual).toEqual([4, 8, 12]);
     expect(bytes.buffer.byteLength).toBe(0);
@@ -216,7 +216,7 @@ describe('Port Messenger', () => {
     });
 
     try {
-      await messenger1.sendMessage('test', transferred.port2, [transferred.port2]);
+      await messenger1.sendMessage('test', transferred.port2, { transfer: [transferred.port2] });
       expect(await received.promise).toBe('transferred port works');
     } finally {
       transferred.port1.close();
@@ -235,9 +235,9 @@ describe('Port Messenger', () => {
     messenger2.onMessage('test', onMessage);
 
     const error = await messenger1
-      .sendMessage('test', bytes, [bytes.buffer, bytes.buffer])
+      .sendMessage('test', bytes, { transfer: [bytes.buffer, bytes.buffer] })
       .catch((err: unknown) => err);
-    const actual = await messenger1.sendMessage('test', bytes, [bytes.buffer]);
+    const actual = await messenger1.sendMessage('test', bytes, { transfer: [bytes.buffer] });
 
     expect(error).toMatchObject({ name: 'DataCloneError' });
     expect(actual).toBe(3);
@@ -280,5 +280,151 @@ describe('Port Messenger', () => {
     await messenger1.sendMessage('ready');
 
     expect(onResponse).not.toHaveBeenCalled();
+  });
+
+  it('should resolve no-response sends without a receiver handler', async () => {
+    interface MessageSchema {
+      test(data: string): number;
+    }
+    const messenger = defineTestMessaging<MessageSchema>(channel.port1);
+
+    expect(await messenger.sendMessage('test', 'hello', { expectResponse: false })).toBeUndefined();
+  });
+
+  it('should not wait for deferred no-response handlers or send a response frame', async () => {
+    interface MessageSchema {
+      test(): number;
+      ready(): void;
+    }
+    const messenger1 = defineTestMessaging<MessageSchema>(channel.port1);
+    const messenger2 = defineTestMessaging<MessageSchema>(channel.port2);
+    const entered = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<number>();
+    const completed = Promise.withResolvers<void>();
+    const frames: unknown[] = [];
+    channel.port1.addEventListener('message', ({ data }) => frames.push(data));
+    channel.port1.start();
+    messenger2.onMessage('test', async () => {
+      entered.resolve();
+      const result = await response.promise;
+      completed.resolve();
+      return result;
+    });
+    messenger2.onMessage('ready', () => {});
+
+    expect(
+      await messenger1.sendMessage('test', undefined, { expectResponse: false }),
+    ).toBeUndefined();
+    await entered.promise;
+    response.resolve(7);
+    await completed.promise;
+    await messenger1.sendMessage('ready');
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ message: { type: 'ready' } });
+  });
+
+  it('should deliver transferred data without waiting for a response', async () => {
+    interface MessageSchema {
+      test(data: Uint8Array): number;
+    }
+    const messenger1 = defineTestMessaging<MessageSchema>(channel.port1);
+    const messenger2 = defineTestMessaging<MessageSchema>(channel.port2);
+    const received = Promise.withResolvers<number[]>();
+    messenger2.onMessage('test', ({ data }) => {
+      received.resolve(Array.from(data));
+      return data.byteLength;
+    });
+    const bytes = new Uint8Array([4, 8, 12]);
+
+    const actual = await messenger1.sendMessage('test', bytes, {
+      transfer: [bytes.buffer],
+      expectResponse: false,
+    });
+
+    expect(actual).toBeUndefined();
+    expect(bytes.buffer.byteLength).toBe(0);
+    expect(await received.promise).toEqual([4, 8, 12]);
+  });
+
+  it('should wait for a void handler to complete by default', async () => {
+    interface MessageSchema {
+      test(): void;
+    }
+    const messenger1 = defineTestMessaging<MessageSchema>(channel.port1);
+    const messenger2 = defineTestMessaging<MessageSchema>(channel.port2);
+    const entered = Promise.withResolvers<void>();
+    const completion = Promise.withResolvers<void>();
+    let acknowledged = false;
+    messenger2.onMessage('test', async () => {
+      entered.resolve();
+      await completion.promise;
+    });
+
+    const acknowledgment = messenger1.sendMessage('test').then(() => {
+      acknowledged = true;
+    });
+    await entered.promise;
+    expect(acknowledged).toBe(false);
+    completion.resolve();
+    await acknowledgment;
+    expect(acknowledged).toBe(true);
+  });
+
+  it('should log no-response handler errors locally without a response frame', async () => {
+    interface MessageSchema {
+      test(): void;
+      ready(): void;
+    }
+    const messenger1 = defineTestMessaging<MessageSchema>(channel.port1);
+    const logged = Promise.withResolvers<unknown[]>();
+    const error = vi.fn((...args: unknown[]) => logged.resolve(args));
+    const messenger2 = definePortMessaging<MessageSchema>({
+      port: channel.port2,
+      namespace: 'default-namespace',
+      logger: { debug: () => {}, log: () => {}, warn: () => {}, error },
+    });
+    messengers.push(messenger2);
+    const frames: unknown[] = [];
+    channel.port1.addEventListener('message', ({ data }) => frames.push(data));
+    channel.port1.start();
+    messenger2.onMessage('test', () => {
+      throw new TypeError('No-response handler failed');
+    });
+    messenger2.onMessage('ready', () => {});
+
+    expect(
+      await messenger1.sendMessage('test', undefined, { expectResponse: false }),
+    ).toBeUndefined();
+    const args = await logged.promise;
+    await messenger1.sendMessage('ready');
+
+    expect(args[1]).toMatchObject({ name: 'TypeError', message: 'No-response handler failed' });
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ message: { type: 'ready' } });
+  });
+
+  it('should reject invalid transfers on no-response sends without delivering data', async () => {
+    interface MessageSchema {
+      test(data: Uint8Array): number;
+    }
+    const messenger1 = defineTestMessaging<MessageSchema>(channel.port1);
+    const messenger2 = defineTestMessaging<MessageSchema>(channel.port2);
+    const onMessage = vi.fn(({ data }: { data: Uint8Array }) => data.byteLength);
+    messenger2.onMessage('test', onMessage);
+    const bytes = new Uint8Array([4, 8, 12]);
+
+    const error = await messenger1
+      .sendMessage('test', bytes, {
+        transfer: [bytes.buffer, bytes.buffer],
+        expectResponse: false,
+      })
+      .catch((err: unknown) => err);
+    const actual = await messenger1.sendMessage('test', bytes, { transfer: [bytes.buffer] });
+
+    expect(error).toMatchObject({ name: 'DataCloneError' });
+    expect(actual).toBe(3);
+    expect(onMessage).toHaveBeenCalledTimes(1);
   });
 });

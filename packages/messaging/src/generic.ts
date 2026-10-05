@@ -7,6 +7,7 @@ import {
   MaybePromise,
   BaseMessagingConfig,
   Message,
+  PostMessageSendOptions,
 } from './types';
 
 /** Config required to call `defineGenericMessenger`. */
@@ -88,6 +89,35 @@ export interface GenericMessenger<
 
   /** Removes all listeners. */
   removeAllListeners(this: void): void;
+}
+
+type PostMessageReturn<
+  TReturn,
+  TOptions extends PostMessageSendOptions,
+> = 'expectResponse' extends keyof TOptions
+  ? TOptions['expectResponse'] extends false
+    ? void
+    : false extends TOptions['expectResponse']
+      ? TReturn | void
+      : TReturn
+  : TReturn;
+
+/** Messaging interface for workers and ports that support transfers and optional responses. */
+export interface PostMessageMessenger<TProtocolMap extends Record<string, any>> extends Omit<
+  GenericMessenger<TProtocolMap, {}, []>,
+  'sendMessage'
+> {
+  /**
+   * Send a message with an optional transfer list and response setting. Without a response, the
+   * promise resolves after posting and returns no value.
+   */
+  sendMessage<TType extends keyof TProtocolMap, const TOptions extends PostMessageSendOptions = {}>(
+    this: void,
+    type: TType,
+    ...args: GetDataType<TProtocolMap[TType]> extends undefined
+      ? [data?: undefined, options?: TOptions]
+      : [data: GetDataType<TProtocolMap[TType]>, options?: TOptions]
+  ): Promise<PostMessageReturn<GetReturnType<TProtocolMap[TType]>, TOptions>>;
 }
 
 export function defineGenericMessanging<

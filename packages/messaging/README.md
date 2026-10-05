@@ -54,6 +54,10 @@ const portMessenger = definePortMessaging<ProtocolMap>({
 For `worker`, pass a `Worker` reference or `self` inside the worker.
 For `port`, pass a `MessagePort`, such as `AudioWorkletNode.port` or a port from `MessageChannel`.
 
+`sendMessage` accepts `{ transfer: [buffer], expectResponse: false }` as its third argument.
+Omit `expectResponse` to wait for a response.
+With `expectResponse: false`, the promise resolves after posting, without a return value or remote error.
+
 ## Get Started
 
 See [documentation](https://webext-core.aklinker1.io/messaging/installation) to
