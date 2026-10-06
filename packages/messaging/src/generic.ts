@@ -10,7 +10,7 @@ import {
   PostMessageSendOptions,
 } from './types';
 
-/** Config required to call `defineGenericMessenger`. */
+/** Config required to call `defineGenericMessanging`. */
 interface GenericMessagingConfig<
   TProtocolMap extends Record<string, any>,
   TMessageExtension,

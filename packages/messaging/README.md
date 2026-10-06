@@ -32,6 +32,17 @@ const length = await sendMessage('getStringLength', 'hello world');
 console.log(length); // 11
 ```
 
+## Messenger Interface
+
+The package root exports the shared `GenericMessenger` interface as a type.
+Its type parameters define the protocol, extra message fields, and extra `sendMessage` arguments.
+
+```ts
+import type { GenericMessenger } from '@webext-core/messaging';
+
+type Messenger = GenericMessenger<ProtocolMap, {}, []>;
+```
+
 ## Other Transports
 
 Worker and port messaging use the same `sendMessage` and `onMessage` APIs.
